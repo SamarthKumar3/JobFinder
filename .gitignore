@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.venv/
+.local/
+data/
+*.pdf
+*.docx
+*.log
+__pycache__/
+
+*.xlsx

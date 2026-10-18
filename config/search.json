@@ -1,0 +1,16 @@
+{
+  "terms": [
+    "AI Engineer",
+    "LLM Engineer",
+    "Python Backend Engineer",
+    "Full Stack AI Engineer"
+  ],
+  "location": "Pune, Bengaluru, Delhi NCR",
+  "locations": ["Pune", "Bengaluru", "Delhi NCR"],
+  "country": "India",
+  "sites": ["linkedin", "indeed", "naukri"],
+  "resultsPerSearch": 10,
+  "hoursOld": 24,
+  "companyUrls": [],
+  "targeting": "Candidate has 1.5 years experience, not a fresher. Full-time employment only; no internships or contract roles. Target Pune, Bangalore/Bengaluru, and Delhi NCR (including Gurugram/Gurgaon, Delhi, Noida, Greater Noida, Faridabad and Ghaziabad). Hybrid, onsite and in-office are acceptable. Minimum annual salary INR 2000000 (20 LPA). Disclosed compensation below this minimum is a blocker; unknown salary must be flagged for verification. Target AI/LLM/agentic software engineering, Python backend and full-stack AI engineering. Do not invent additional preferences."
+}
