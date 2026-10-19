@@ -5,6 +5,11 @@ export const pool = new pg.Pool({
   max: 8,
   connectionTimeoutMillis: 5000,
 });
+// Idle connections can emit errors when Docker restarts. Keep the HTTP server
+// alive so pg can establish new connections after PostgreSQL recovers.
+pool.on("error", (error) => {
+  console.error("PostgreSQL connection interrupted:", error.message);
+});
 export async function migrate() {
   if (!process.env.DATABASE_URL) throw new Error("Set DATABASE_URL in .env");
   await pool.query(`

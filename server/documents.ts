@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import fs from "node:fs/promises";
 import path from "node:path";
 import PDFDocument from "pdfkit";
@@ -92,9 +93,10 @@ let active = false;
 export async function drainArtifacts() {
   if (active) return;
   active = true;
-  const client = await pool.connect();
+  let client: PoolClient | undefined;
   let locked = false;
   try {
+    client = await pool.connect();
     locked = (
       await client.query("SELECT pg_try_advisory_lock(7284520) AS locked")
     ).rows[0].locked;
@@ -154,8 +156,12 @@ export async function drainArtifacts() {
       }
     }
   } finally {
-    if (locked) await client.query("SELECT pg_advisory_unlock(7284520)");
-    client.release();
-    active = false;
+    try {
+      if (locked && client)
+        await client.query("SELECT pg_advisory_unlock(7284520)");
+    } finally {
+      client?.release();
+      active = false;
+    }
   }
 }
