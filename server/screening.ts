@@ -50,6 +50,7 @@ export function requiredExperience(
     if (m) required.push(Number(m[1]));
   }
   const numbers: Record<string, number> = {
+    zero: 0,
     one: 1,
     two: 2,
     three: 3,
@@ -64,7 +65,7 @@ export function requiredExperience(
     twenty: 20,
   };
   const text = description.replace(
-    /\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)(?=\s*(?:\+?\s*(?:years?|yrs?)|to\s))/gi,
+    /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)(?=\s*(?:\+?\s*(?:years?|yrs?)|to\s))/gi,
     (w) => String(numbers[w.toLowerCase()]),
   );
   const patterns = [
@@ -117,11 +118,8 @@ export function screenJob(
     reasons.push(
       `Requires at least ${exp} years; automatic search allows a minimum requirement up to ${maxYears} years`,
     );
-  const band = String(metadata.experience_range ?? "");
-  if (/^\s*0\s*(?:[-–—]|to)\s*[01]\b/i.test(band))
-    reasons.push(
-      "Opening is restricted to a fresher / 0–1 year experience band",
-    );
+  // Junior bands (including 0–1, 0–2 and 0–3) use their lower bound.
+  // A numeric band alone does not mean the opening is fresher-only.
   const salary = (
     metadata.salary && typeof metadata.salary === "object"
       ? metadata.salary

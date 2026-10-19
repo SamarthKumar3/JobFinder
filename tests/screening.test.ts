@@ -165,7 +165,7 @@ test("parenthesized and plus-year requirements are blocked; ranges use their min
   assert.equal(requiredExperience("1-2 years of experience"), 1);
 });
 
-test("disclosed low salaries and fresher-only bands are screened; unknown salary is retained", () => {
+test("disclosed low salaries are screened; unknown salary is retained", () => {
   assert.equal(
     screenJob({
       ...job,
@@ -181,12 +181,72 @@ test("disclosed low salaries and fresher-only bands are screened; unknown salary
     true,
   );
   assert.equal(
-    screenJob({ ...job, metadata: { experience_range: "0-1 Yrs" } }).eligible,
-    false,
-  );
-  assert.equal(
     screenJob({ ...job, metadata: { currency: "INR", max_amount: null } })
       .eligible,
     true,
+  );
+});
+
+test("junior experience bands and 1+/2+ requirements are eligible in descriptions and source metadata", () => {
+  for (const experience of [
+    "0-1 years",
+    "0–2 years",
+    "0 to 3 years",
+    "zero to three years",
+    "0-0.5 years",
+    "0.5-1 years",
+    "0.5 years",
+    "1+ years",
+    "2+ years",
+  ]) {
+    const description = `Build Python and LLM applications. Requires ${experience} of experience.`;
+    assert.equal(screenJob({ ...job, description }).eligible, true, experience);
+    if (!experience.startsWith("zero")) {
+      for (const key of [
+        "experience_range",
+        "experienceRange",
+        "requiredExperience",
+      ])
+        assert.equal(
+          screenJob({ ...job, metadata: { [key]: experience } }).eligible,
+          true,
+          `${key}: ${experience}`,
+        );
+    }
+  }
+});
+
+test("junior bands do not bypass other mandatory experience or employment restrictions", () => {
+  for (const experience of ["3+ years", "5+ years", "15-19 years"])
+    assert.equal(
+      screenJob({
+        ...job,
+        description: `Python. Requires ${experience} of experience.`,
+      }).eligible,
+      false,
+      experience,
+    );
+  assert.equal(
+    screenJob({
+      ...job,
+      metadata: { experience_range: "0-3 years" },
+      description: "Python. Minimum 5 years of professional experience.",
+    }).eligible,
+    false,
+  );
+  assert.equal(
+    screenJob({
+      ...job,
+      metadata: { experience_range: "0-1 years", job_type: "internship" },
+    }).eligible,
+    false,
+  );
+  assert.equal(
+    screenJob({
+      ...job,
+      metadata: { experience_range: "0-3 years" },
+      description: "Python. Freshers only.",
+    }).eligible,
+    false,
   );
 });
