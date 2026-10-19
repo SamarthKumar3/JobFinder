@@ -90,8 +90,12 @@ export async function renderDocument(
   }
 }
 let active = false;
+let wakeAgain = false;
 export async function drainArtifacts() {
-  if (active) return;
+  if (active) {
+    wakeAgain = true;
+    return;
+  }
   active = true;
   let client: PoolClient | undefined;
   let locked = false;
@@ -102,59 +106,62 @@ export async function drainArtifacts() {
     ).rows[0].locked;
     if (!locked) return;
     await client.query(`UPDATE tasks SET state='queued' WHERE state='running'`);
-    for (;;) {
-      const task = (
-        await client.query(
-          `UPDATE tasks SET state='running' WHERE id=(SELECT id FROM tasks WHERE state='queued' ORDER BY created_at LIMIT 1) RETURNING *`,
-        )
-      ).rows[0];
-      if (!task) break;
-      try {
-        const job = (
-          await client.query("SELECT * FROM jobs WHERE id=$1", [task.job_id])
+    do {
+      wakeAgain = false;
+      for (;;) {
+        const task = (
+          await client.query(
+            `UPDATE tasks SET state='running' WHERE id=(SELECT id FROM tasks WHERE state='queued' ORDER BY created_at LIMIT 1) RETURNING *`,
+          )
         ).rows[0];
-        if (!job || job.state !== "evaluated" || Number(job.score) < 2)
-          throw new Error(
-            "Job needs a completed evaluation and score of at least 2",
+        if (!task) break;
+        try {
+          const job = (
+            await client.query("SELECT * FROM jobs WHERE id=$1", [task.job_id])
+          ).rows[0];
+          if (!job || job.state !== "evaluated" || Number(job.score) < 2)
+            throw new Error(
+              "Job needs a completed evaluation and score of at least 2",
+            );
+          const kind = task.kind as "resume" | "cover",
+            content = await draft(kind, job, job.evaluation);
+          const dir = path.join(DATA, "artifacts");
+          await fs.mkdir(dir, { recursive: true });
+          const filename = `${task.id}.${kind === "resume" ? "pdf" : "docx"}`;
+          await renderDocument(kind, content, path.join(dir, filename));
+          const tailoredEvaluation =
+            kind === "resume"
+              ? await evaluate(
+                  job,
+                  content.sections
+                    .flatMap((s) => s.paragraphs.map((p) => p.text))
+                    .join("\n"),
+                )
+              : null;
+          await client.query(
+            `UPDATE tasks SET state='completed',result=$2,finished_at=now() WHERE id=$1`,
+            [
+              task.id,
+              {
+                filename,
+                download_url: `/api/tasks/${task.id}/download`,
+                changes: content.changes,
+                remainingGaps: content.remainingGaps,
+                tailoredEvaluation,
+                originalScore: job.score,
+                contentHash: job.content_hash,
+                reviewRequired: true,
+              },
+            ],
           );
-        const kind = task.kind as "resume" | "cover",
-          content = await draft(kind, job, job.evaluation);
-        const dir = path.join(DATA, "artifacts");
-        await fs.mkdir(dir, { recursive: true });
-        const filename = `${task.id}.${kind === "resume" ? "pdf" : "docx"}`;
-        await renderDocument(kind, content, path.join(dir, filename));
-        const tailoredEvaluation =
-          kind === "resume"
-            ? await evaluate(
-                job,
-                content.sections
-                  .flatMap((s) => s.paragraphs.map((p) => p.text))
-                  .join("\n"),
-              )
-            : null;
-        await client.query(
-          `UPDATE tasks SET state='completed',result=$2,finished_at=now() WHERE id=$1`,
-          [
-            task.id,
-            {
-              filename,
-              download_url: `/api/tasks/${task.id}/download`,
-              changes: content.changes,
-              remainingGaps: content.remainingGaps,
-              tailoredEvaluation,
-              originalScore: job.score,
-              contentHash: job.content_hash,
-              reviewRequired: true,
-            },
-          ],
-        );
-      } catch (e) {
-        await client.query(
-          `UPDATE tasks SET state='error',error=$2,finished_at=now() WHERE id=$1`,
-          [task.id, String(e)],
-        );
+        } catch (e) {
+          await client.query(
+            `UPDATE tasks SET state='error',error=$2,finished_at=now() WHERE id=$1`,
+            [task.id, String(e)],
+          );
+        }
       }
-    }
+    } while (wakeAgain);
   } finally {
     try {
       if (locked && client)

@@ -8,7 +8,15 @@ import { z } from "zod";
 import { DATA, ROOT, prepareDirectories, searchConfig } from "./config";
 import { migrate, pool } from "./db";
 import { filterClause, jobSchema } from "./domain";
-import { ingest, runWorkflow, companyUrls } from "./workflow";
+import {
+  ingest,
+  runWorkflow,
+  companyUrls,
+  reconcileWorkflowRuns,
+  rescreenStoredJobs,
+} from "./workflow";
+import { listJobs, querySchema } from "./jobs-query";
+import { createSubmission, drainSubmissions } from "./submissions";
 import { drainArtifacts } from "./documents";
 const app = express();
 app.disable("x-powered-by");
@@ -46,11 +54,13 @@ app.get("/api/health", async (_req, res) => {
   res.json({ ok: true });
 });
 app.get("/api/status", async (_req, res) => {
+  await reconcileWorkflowRuns();
   const counts = (
-    await pool.query(`SELECT count(*)::int AS all,
+    await pool.query(`SELECT count(*) FILTER(WHERE state<>'filtered')::int AS all,
+    count(*) FILTER(WHERE state='filtered')::int AS filtered,
     count(*) FILTER(WHERE state='evaluated' AND decision='apply')::int AS apply,
     count(*) FILTER(WHERE state='evaluated' AND decision='rejected')::int AS rejected,
-    count(*) FILTER(WHERE state IN ('pending','error') OR decision='review')::int AS pending FROM jobs`)
+    count(*) FILTER(WHERE state<>'filtered' AND (state IN ('pending','error') OR decision='review'))::int AS pending FROM jobs`)
   ).rows[0];
   const runs = (
     await pool.query("SELECT * FROM runs ORDER BY started_at DESC LIMIT 8")
@@ -62,33 +72,22 @@ app.get("/api/status", async (_req, res) => {
       .next()
       .toISOString(),
     timezone,
-    search: await searchConfig(),
-    companyUrls: await companyUrls(),
   });
 });
 app.get("/api/jobs", async (req, res) => {
-  const tab = z
-      .enum(["apply", "rejected", "all", "pending"])
-      .parse(req.query.tab || "apply"),
-    q = String(req.query.q || "").slice(0, 200);
-  const offset = z.coerce
-    .number()
-    .int()
-    .min(0)
-    .parse(req.query.offset || 0);
-  const where = `(${filterClause(tab)}) AND (title ILIKE $1 OR company ILIKE $1 OR location ILIKE $1)`;
-  const rows = (
-    await pool.query(
-      `SELECT id,title,company,location,source,apply_url,score,decision,state,error,created_at FROM jobs WHERE ${where} ORDER BY score DESC NULLS LAST,created_at DESC LIMIT 50 OFFSET $2`,
-      [`%${q}%`, offset],
-    )
-  ).rows;
-  const total = (
-    await pool.query(`SELECT count(*)::int AS n FROM jobs WHERE ${where}`, [
-      `%${q}%`,
-    ])
-  ).rows[0].n;
-  res.json({ jobs: rows, total });
+  res.json(await listJobs(querySchema.parse(req.query)));
+});
+app.get("/api/submissions", async (_req, res) => {
+  res.json({
+    submissions: (
+      await pool.query(
+        `SELECT s.id,s.url,s.state,s.job_id,s.error,s.created_at,s.finished_at,j.title,j.company,j.score FROM submissions s LEFT JOIN jobs j ON j.id=s.job_id ORDER BY s.created_at DESC LIMIT 50`,
+      )
+    ).rows,
+  });
+});
+app.post("/api/submissions", async (req, res) => {
+  res.status(202).json(await createSubmission(req.body));
 });
 app.get("/api/jobs/:id", async (req, res) => {
   const job = (
@@ -111,21 +110,39 @@ app.post("/api/jobs/import", async (req, res) => {
 });
 app.post("/api/jobs/:id/retry", async (req, res) => {
   const result = await pool.query(
-    `UPDATE jobs SET state='pending',attempts=0,error=NULL,score=NULL,decision=NULL WHERE id=$1 RETURNING id`,
+    `UPDATE jobs SET state='pending',attempts=0,error=NULL,score=NULL,decision=NULL WHERE id=$1 RETURNING *`,
     [uuid(req.params.id)],
   );
   if (!result.rowCount) return res.status(404).json({ error: "Job not found" });
+  const job = result.rows[0];
+  if (job.manual)
+    await createSubmission({
+      url: job.apply_url,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      description: job.description,
+    });
   res.json({ queued: true });
 });
 app.post("/api/jobs/:id/confirm", async (req, res) => {
   const id = uuid(req.params.id),
     answer = z.string().trim().min(3).max(2000).parse(req.body.answer);
   const result = await pool.query(
-    `UPDATE jobs SET metadata=jsonb_set(metadata,'{candidate_confirmation}',to_jsonb($2::text)),state='pending',attempts=0,score=NULL,decision=NULL,error=NULL WHERE id=$1 AND decision='review' RETURNING id`,
+    `UPDATE jobs SET metadata=jsonb_set(metadata,'{candidate_confirmation}',to_jsonb($2::text)),state='pending',attempts=0,score=NULL,decision=NULL,error=NULL WHERE id=$1 AND decision='review' RETURNING *`,
     [id, answer],
   );
   if (!result.rowCount)
     return res.status(409).json({ error: "Job is not awaiting confirmation" });
+  const job = result.rows[0];
+  if (job.manual)
+    await createSubmission({
+      url: job.apply_url,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      description: job.description,
+    });
   res.json({ queued: true });
 });
 app.post("/api/run", (_req, res) => {
@@ -186,18 +203,18 @@ app.use(
     _next: express.NextFunction,
   ) => {
     console.error(err.message);
-    res
-      .status(err instanceof z.ZodError ? 400 : 500)
-      .json({
-        error:
-          err instanceof z.ZodError
-            ? err.issues.map((i) => i.message).join("; ")
-            : err.message,
-      });
+    res.status(err instanceof z.ZodError ? 400 : 500).json({
+      error:
+        err instanceof z.ZodError
+          ? err.issues.map((i) => i.message).join("; ")
+          : err.message,
+    });
   },
 );
 await prepareDirectories();
 await migrate();
+await reconcileWorkflowRuns();
+await rescreenStoredJobs();
 cron.schedule(
   schedule,
   () => {
@@ -205,15 +222,20 @@ cron.schedule(
   },
   { timezone },
 );
-const worker = setInterval(() => {
-  void drainArtifacts().catch(console.error);
-}, 5000);
 void drainArtifacts().catch(console.error);
-const server = app.listen(Number(process.env.PORT) || 4100, "127.0.0.1", () =>
-  console.log("JobFinder: http://127.0.0.1:4100"),
+void drainSubmissions().catch(console.error);
+const server = app.listen(
+  Number(process.env.PORT) || 4100,
+  "127.0.0.1",
+  (error?: Error) => {
+    if (error) {
+      console.error("Dashboard could not start:", error.message);
+      process.exit(1);
+    }
+    console.log("JobFinder: http://127.0.0.1:4100");
+  },
 );
 process.on("SIGTERM", () => {
-  clearInterval(worker);
   server.close(() => {
     void pool.end();
   });

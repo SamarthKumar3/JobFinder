@@ -15,6 +15,7 @@ export const searchSchema = z.object({
   sites: z.array(z.enum(["linkedin", "indeed", "naukri"])),
   resultsPerSearch: z.number().int().min(1).max(50),
   hoursOld: z.literal(24),
+  maxRequiredExperienceYears: z.number().min(0).max(5).default(2),
   companyUrls: z.array(z.url()).max(50),
   targeting: z.string().max(5000),
 });

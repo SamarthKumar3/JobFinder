@@ -36,6 +36,18 @@ export async function migrate() {
       id uuid PRIMARY KEY, job_id uuid REFERENCES jobs(id), kind text NOT NULL, state text NOT NULL DEFAULT 'queued',
       result jsonb, error text, created_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz
     );
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS locations text[] NOT NULL DEFAULT '{}';
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS manual boolean NOT NULL DEFAULT false;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS screening jsonb;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT 'starting';
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS filtered integer NOT NULL DEFAULT 0;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+    CREATE TABLE IF NOT EXISTS submissions (
+      id uuid PRIMARY KEY,url text NOT NULL,state text NOT NULL DEFAULT 'queued',
+      job_id uuid REFERENCES jobs(id),error text,created_at timestamptz NOT NULL DEFAULT now(),finished_at timestamptz
+    );
+    ALTER TABLE submissions ADD COLUMN IF NOT EXISTS input jsonb NOT NULL DEFAULT '{}';
+    CREATE INDEX IF NOT EXISTS job_locations ON jobs USING gin(locations);
     CREATE UNIQUE INDEX IF NOT EXISTS active_artifact ON tasks(job_id,kind) WHERE state IN ('queued','running');
     CREATE INDEX IF NOT EXISTS jobs_score ON jobs(score DESC,created_at DESC);
     CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state);

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import dns from "node:dns/promises";
 import https from "node:https";
 import net from "node:net";
@@ -6,6 +7,17 @@ import { pathToFileURL } from "node:url";
 import { OPS } from "./config";
 import { load } from "cheerio";
 import { recency, type IncomingJob } from "./domain";
+const sourceBudget = new AsyncLocalStorage<{
+  deadline: number;
+  signal?: AbortSignal;
+}>();
+export function withSourceBudget<T>(
+  work: () => Promise<T>,
+  timeout = 20000,
+  signal?: AbortSignal,
+) {
+  return sourceBudget.run({ deadline: Date.now() + timeout, signal }, work);
+}
 export function publicIp(ip: string) {
   if (net.isIP(ip) !== 4) return false;
   const [a, b] = ip.split(".").map(Number);
@@ -30,6 +42,9 @@ export async function safeGet(
     headers?: Record<string, string>;
   } = {},
 ): Promise<string> {
+  const budget = sourceBudget.getStore();
+  if (budget?.signal?.aborted || (budget && Date.now() >= budget.deadline))
+    throw new Error("Company source time limit reached");
   const u = new URL(raw);
   if (
     u.protocol !== "https:" ||
@@ -42,10 +57,15 @@ export async function safeGet(
   if (!addresses.length || addresses.some((a) => !publicIp(a.address)))
     throw new Error("Private/local addresses are not allowed");
   return new Promise((resolve, reject) => {
+    const remaining = Math.min(
+      25000,
+      budget ? Math.max(1, budget.deadline - Date.now()) : 25000,
+    );
     const req = https.request(
       u,
       {
         method: opts.method || "GET",
+        signal: budget?.signal,
         headers: {
           ...opts.headers,
           "User-Agent": "JobFinder/1.0 personal job search",
@@ -87,7 +107,12 @@ export async function safeGet(
         res.on("error", reject);
       },
     );
-    req.setTimeout(25000, () => req.destroy(new Error("Source timed out")));
+    const deadlineTimer = setTimeout(
+      () => req.destroy(new Error("Company source time limit reached")),
+      remaining,
+    );
+    req.once("close", () => clearTimeout(deadlineTimer));
+    req.setTimeout(remaining, () => req.destroy(new Error("Source timed out")));
     req.on("error", reject);
     req.end(opts.body);
   });

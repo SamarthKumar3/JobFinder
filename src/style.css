@@ -401,3 +401,158 @@ dialog::backdrop {
 .jobrow:hover td {
   background: #f0f6fa;
 }
+.header-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.workflow-status {
+  position: relative;
+  text-transform: capitalize;
+}
+.info-icon {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  margin-left: 6px;
+}
+.status-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 280px;
+  max-width: 360px;
+  padding: 12px 14px;
+  border-radius: 7px;
+  background: #192b3b;
+  color: white;
+  font-weight: 400;
+  font-size: 13px;
+  text-align: left;
+  text-transform: none;
+  white-space: pre-line;
+  z-index: 20;
+  box-shadow: 0 5px 18px #192b3b30;
+}
+.workflow-status:hover .status-tooltip,
+.workflow-status:focus .status-tooltip {
+  display: block;
+}
+.table-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr)) minmax(200px, 1.2fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+.table-filters label,
+.url-entry label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #47596b;
+}
+.table-filters input,
+.table-filters select {
+  width: 100%;
+  min-width: 0;
+}
+select {
+  font: inherit;
+  min-height: 44px;
+  padding: 9px 12px;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  background: #fff;
+  color: #192b3b;
+}
+.url-entry input {
+  width: 100%;
+}
+.url-entry form {
+  display: grid;
+  gap: 18px;
+}
+.url-entry form > .primary {
+  justify-self: start;
+}
+.fallback-fields {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin: 14px 0;
+}
+.submission {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 20px;
+}
+.submission a {
+  overflow-wrap: anywhere;
+}
+.submission button {
+  flex-shrink: 0;
+}
+.manual-result {
+  padding: 20px 0;
+}
+.manual-result > h2,
+.manual-result > p {
+  padding: 0 28px;
+}
+.manual-result .modalbody {
+  padding-top: 0;
+}
+.metadata button {
+  margin-left: auto;
+}
+select:focus-visible {
+  outline: 3px solid #1675b4;
+  outline-offset: 3px;
+}
+@media (max-width: 1000px) {
+  .table-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .table-filters > button {
+    justify-self: start;
+  }
+  .header-actions {
+    justify-content: flex-end;
+  }
+}
+@media (max-width: 650px) {
+  header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .header-actions {
+    justify-content: flex-start;
+  }
+  .table-filters {
+    grid-template-columns: 1fr;
+  }
+  .fallback-fields {
+    grid-template-columns: 1fr;
+  }
+  .workflow-status .status-tooltip {
+    left: 0;
+    right: auto;
+    max-width: calc(100vw - 45px);
+  }
+  .submission {
+    flex-direction: column;
+  }
+  .metadata button {
+    margin-left: 0;
+  }
+}

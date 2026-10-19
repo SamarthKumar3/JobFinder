@@ -35,7 +35,7 @@ The adapter defaults to the authenticated `codex exec` CLI in read-only mode, us
 
 Alternatively set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL` and optionally `OPENAI_BASE_URL` in `.env` for a compatible endpoint. Resume and job text are sent to the selected AI provider; no resume or keys are committed to Git.
 
-All discovered complete jobs are stored **before** evaluation. URL normalization deduplicates repeated scans, content changes queue rescoring, and every successful evaluation is retained in `evaluations`. Errors retry up to three daily runs, with a manual retry control, only while the posting remains within the 24-hour window. The cap is 30 evaluations per run by default; backlog remains in Needs review until evaluated or skipped after aging out.
+All discovered complete jobs are stored **before** evaluation. Automatic results pass a deterministic pre-screen before entering the Career Ops queue: target engineering titles and relevant technology, no senior/lead/architect/management positions, explicit minimum experience at most 2 years, no fresher-only / 0–1-year bands, no internships/contracts and no disclosed INR salary ceiling below 20 LPA. The experience margin is configurable with `maxRequiredExperienceYears`. Rejected pre-screen records are retained with reasons as `state=filtered` and excluded from job views; existing evaluations are preserved. The pre-screen is also applied to existing records at startup and rechecked immediately before automatic evaluation. URL normalization deduplicates repeated scans, content changes queue rescoring, and every successful evaluation is retained in `evaluations`. Errors retry up to three daily runs, with a manual retry control, only while the posting remains within the 24-hour window. The cap is 30 evaluations per run by default; backlog remains in Needs review until evaluated or skipped after aging out.
 
 - `Apply`: completed evaluation, score **strictly greater than 4**, Career Ops recommends apply and no blockers.
 - `Rejected`: other completed non-confirmation decisions, including exactly 4.0.
@@ -59,6 +59,14 @@ Dashboard binds only to 127.0.0.1 and has local host/origin checks. Keep it loca
 
 ## API and checks
 
+The dashboard has no interval polling. Initial loads, user changes to views/filters, and the **Refresh** buttons fetch data. Artifact and URL workers wake on requests/startup rather than polling an idle queue. The schedule and last-run phase are available in the workflow-status info tooltip.
+
+`GET /api/jobs` accepts exact `company`, `role` and normalized `location` filters in addition to `tab`, `q` and `offset`. Its `filters` field contains backend-computed values/counts across **all matching records before pagination**. Each facet omits its own active selection when aggregating options. Multi-location postings match each city and Delhi NCR group membership. No frontend page-based aggregation is used.
+
+**Evaluate URL** submits an individual posting through `POST /api/submissions` with `{url}`. Public Naukri links use JobSpy's individual-job transport; structured job pages and public LinkedIn pages have HTML extractors. If a site blocks extraction, the form accepts user-pasted title, company, location and description. User-selected URL jobs deliberately bypass automatic search screening/recency and use the same Career Ops evaluation, job-detail component, PDF resume and Word cover-letter actions. Confirmation gates still require a user answer. `GET /api/submissions` exposes recent submission states; Refresh retrieves completed results. Descriptions and resume text are only sent to the configured, user-approved AI provider.
+
+Workflow rows carry phases and counts. Startup and manual status refresh reconcile a stale `running` record when no worker holds the workflow advisory lock. Scans have a 30-minute deadline, each board worker a 3-minute deadline, and company discovery a 5-minute total budget / 20-second source budget. Slow portals are reported as partial coverage; scans do not wait indefinitely. Owned subprocesses are terminated on cancellation/timeouts.
+
 One filtered endpoint: `GET /api/jobs?tab=apply|rejected|pending|all&q=...&offset=0` (50 rows per page). Job details: `GET /api/jobs/:id`. Workflow: `POST /api/run`. Artifact queue: `POST /api/jobs/:id/artifacts` with `{"kind":"resume"}` or `{"kind":"cover"}`. Import: `POST /api/jobs/import` with an array of `{title,company,location,source,apply_url,description,metadata}`. All POSTs require `Content-Type: application/json` and `X-JobFinder-Request: 1`.
 
 ```powershell
@@ -72,8 +80,8 @@ Postgres data is in the `jobfinder_jobfinder_pg` named volume. Back it up with `
 
 ## Verification on the development machine
 
-- TypeScript production build and six behavior tests passed, including the strict 24-hour cutoff.
-- PostgreSQL integration verified duplicate URLs, unchanged-job score retention and changed-description invalidation.
+- TypeScript production build and eighteen behavior tests passed, including the strict 24-hour cutoff.
+- PostgreSQL integration verified duplicate URLs, unchanged-job score retention, changed-description invalidation, 65-row pagination/facets, exact filters, multi-city matches, pre-screen exclusions and stale-run reconciliation.
 - Public LinkedIn, Indeed and Naukri collectors were exercised. The final strict-window smoke search returned fresh LinkedIn/Naukri jobs and no fresh Indeed jobs for that query.
 - Authenticated Codex evaluation was exercised on real postings after explicit user approval for sending the resume to Codex.
 - React filters and job metadata modal were checked in the browser. PDF output was rendered and visually inspected. Word OOXML/file structure was checked; full Word visual rendering was unavailable because LibreOffice is not installed.

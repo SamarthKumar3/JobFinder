@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { PoolClient } from "pg";
 import { pool } from "./db";
 import {
   jobSchema,
@@ -9,25 +10,35 @@ import {
   contentHash,
   decision,
   type IncomingJob,
+  type Evaluation,
 } from "./domain";
 import { ROOT, searchConfig } from "./config";
 import { runProcess } from "./process";
-import { collectCompany } from "./company";
+import { collectCompany, withSourceBudget } from "./company";
 import { evaluate, resumeText } from "./ai";
-export async function ingest(raw: unknown) {
+import { screenJob, normalizedLocations } from "./screening";
+export const WORKFLOW_LOCK = 7284519;
+export async function ingest(raw: unknown, manual = false) {
   const j = jobSchema.parse(raw),
     hash = contentHash(j),
     url = canonicalUrl(j.apply_url);
+  const screening = screenJob(
+    j,
+    (await searchConfig()).maxRequiredExperienceYears,
+  );
   const { rows } = await pool.query(
-    `INSERT INTO jobs(id,canonical_url,apply_url,title,company,location,source,description,metadata,content_hash)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-    ON CONFLICT(canonical_url) DO UPDATE SET last_seen_at=now(), title=excluded.title, company=excluded.company,
-    description=excluded.description,location=excluded.location,metadata=excluded.metadata,apply_url=excluded.apply_url,
-    state=CASE WHEN jobs.content_hash<>excluded.content_hash THEN 'pending' ELSE jobs.state END,
+    `INSERT INTO jobs(id,canonical_url,apply_url,title,company,location,source,description,metadata,content_hash,state,error,locations,manual,screening)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+    ON CONFLICT(canonical_url) DO UPDATE SET last_seen_at=now(),title=excluded.title,company=excluded.company,
+    description=excluded.description,location=excluded.location,locations=excluded.locations,metadata=jobs.metadata||excluded.metadata,apply_url=excluded.apply_url,
+    manual=jobs.manual OR excluded.manual,screening=excluded.screening,
+    state=CASE WHEN NOT(excluded.manual OR jobs.manual) AND excluded.state='filtered' THEN 'filtered' WHEN jobs.content_hash<>excluded.content_hash OR jobs.state='filtered' THEN 'pending' ELSE jobs.state END,
+    error=CASE WHEN NOT(excluded.manual OR jobs.manual) AND excluded.state='filtered' THEN excluded.error WHEN jobs.content_hash<>excluded.content_hash OR jobs.state='filtered' THEN NULL ELSE jobs.error END,
     attempts=CASE WHEN jobs.content_hash<>excluded.content_hash THEN 0 ELSE jobs.attempts END,
     score=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.score END,
     decision=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.decision END,
-    content_hash=excluded.content_hash, updated_at=now() RETURNING id`,
+    evaluation=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.evaluation END,
+    content_hash=excluded.content_hash,updated_at=now() RETURNING id`,
     [
       randomUUID(),
       url,
@@ -39,194 +50,318 @@ export async function ingest(raw: unknown) {
       j.description,
       j.metadata,
       hash,
+      !manual && !screening.eligible ? "filtered" : "pending",
+      !manual && !screening.eligible ? screening.reasons.join("; ") : null,
+      normalizedLocations(j.location),
+      manual,
+      screening,
     ],
   );
   return rows[0].id as string;
+}
+export async function rescreenStoredJobs() {
+  const max = (await searchConfig()).maxRequiredExperienceYears;
+  const rows = (
+    await pool.query(
+      "SELECT id,title,description,location,metadata,manual,state FROM jobs",
+    )
+  ).rows;
+  let filtered = 0;
+  for (const j of rows) {
+    const screening = screenJob(j, max);
+    const reject = !j.manual && !screening.eligible;
+    await pool.query(
+      `UPDATE jobs SET locations=$2,screening=$3,state=CASE WHEN $4 THEN 'filtered' WHEN state='filtered' THEN 'pending' ELSE state END,error=CASE WHEN $4 THEN $5 WHEN state='filtered' THEN NULL ELSE error END WHERE id=$1`,
+      [
+        j.id,
+        normalizedLocations(j.location),
+        screening,
+        reject,
+        screening.reasons.join("; "),
+      ],
+    );
+    if (reject) filtered++;
+  }
+  return { filtered };
 }
 export async function companyUrls() {
   const cfg = await searchConfig(),
     urls = [...cfg.companyUrls];
   try {
     await fs.access(path.join(ROOT, "companies.xlsx"));
-    const found = JSON.parse(
-      await runProcess(
-        process.env.PYTHON_BIN || "python",
-        ["scripts/companies.py", "companies.xlsx"],
-        { cwd: ROOT },
+    urls.push(
+      ...JSON.parse(
+        await runProcess(
+          process.env.PYTHON_BIN || "python",
+          ["scripts/companies.py", "companies.xlsx"],
+          { cwd: ROOT, timeout: 10000 },
+        ),
       ),
     );
-    urls.push(...found);
   } catch (e: any) {
     if (e.code !== "ENOENT") throw e;
   }
   return [...new Set(urls)];
 }
-export async function runWorkflow(trigger = "manual") {
+export async function reconcileWorkflowRuns() {
   const client = await pool.connect();
-  const id = randomUUID();
-  const errors: string[] = [];
-  let discovered = 0,
-    evaluated = 0;
+  let locked = false;
   try {
-    const lock = await client.query(
-      "SELECT pg_try_advisory_lock(7284519) AS locked",
+    locked = (
+      await client.query("SELECT pg_try_advisory_lock($1) AS locked", [
+        WORKFLOW_LOCK,
+      ])
+    ).rows[0].locked;
+    if (locked)
+      await client.query(
+        `UPDATE runs SET state='interrupted',phase='interrupted',finished_at=now(),updated_at=now(),errors=errors||$1::jsonb WHERE state='running'`,
+        [
+          JSON.stringify([
+            "Worker stopped before completing this run; no active workflow lock remains.",
+          ]),
+        ],
+      );
+  } finally {
+    try {
+      if (locked)
+        await client.query("SELECT pg_advisory_unlock($1)", [WORKFLOW_LOCK]);
+    } finally {
+      client.release();
+    }
+  }
+}
+export async function saveEvaluation(
+  client: PoolClient,
+  job: any,
+  result: Evaluation,
+) {
+  await client.query("BEGIN");
+  try {
+    await client.query(
+      "INSERT INTO evaluations(job_id,result,content_hash) VALUES($1,$2,$3)",
+      [job.id, result, job.content_hash],
     );
-    if (!lock.rows[0].locked)
+    await client.query(
+      `UPDATE jobs SET state='evaluated',score=$2,decision=$3,evaluation=$4,error=NULL,evaluated_at=now(),updated_at=now() WHERE id=$1 AND content_hash=$5`,
+      [job.id, result.score, decision(result), result, job.content_hash],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  }
+}
+export async function runWorkflow(trigger = "manual") {
+  const client = await pool.connect(),
+    id = randomUUID(),
+    errors: string[] = [];
+  const controller = new AbortController();
+  let locked = false,
+    disconnected = false,
+    created = false;
+  let discovered = 0,
+    evaluated = 0,
+    filtered = 0;
+  const deadline = Date.now() + 30 * 60 * 1000;
+  const timer = setTimeout(
+    () =>
+      controller.abort(new Error("Workflow reached its 30-minute time limit")),
+    30 * 60 * 1000,
+  );
+  const onConnectionError = () => {
+    disconnected = true;
+    controller.abort(new Error("Workflow database connection was lost"));
+  };
+  client.on("error", onConnectionError);
+  const check = () => {
+    if (controller.signal.aborted || Date.now() >= deadline)
+      throw new Error("Workflow interrupted or reached its time limit");
+  };
+  const phase = async (name: string) => {
+    check();
+    await client.query(
+      "UPDATE runs SET phase=$2,discovered=$3,evaluated=$4,filtered=$5,errors=$6,updated_at=now() WHERE id=$1",
+      [id, name, discovered, evaluated, filtered, JSON.stringify(errors)],
+    );
+  };
+  const accept = async (raw: unknown) => {
+    check();
+    const j = jobSchema.parse(raw);
+    if (recency(j.metadata) !== "fresh") return;
+    const eligible = screenJob(
+      j,
+      (await searchConfig()).maxRequiredExperienceYears,
+    ).eligible;
+    await ingest(j);
+    discovered++;
+    if (!eligible) filtered++;
+  };
+  try {
+    locked = (
+      await client.query("SELECT pg_try_advisory_lock($1) AS locked", [
+        WORKFLOW_LOCK,
+      ])
+    ).rows[0].locked;
+    if (!locked)
       return { skipped: true, reason: "A workflow is already running" };
     await client.query(
-      `UPDATE runs SET state='interrupted',finished_at=now() WHERE state='running'`,
+      `UPDATE runs SET state='interrupted',phase='interrupted',finished_at=now(),updated_at=now() WHERE state='running'`,
     );
-    if (trigger === "schedule") {
-      const prior = await client.query(
-        `SELECT id FROM runs WHERE trigger='schedule' AND (started_at AT TIME ZONE 'Asia/Kolkata')::date=(now() AT TIME ZONE 'Asia/Kolkata')::date AND state IN ('running','completed','partial')`,
-      );
-      if (prior.rowCount)
-        return {
-          skipped: true,
-          reason: "Scheduled workflow already ran today",
-        };
-    }
+    if (
+      trigger === "schedule" &&
+      (
+        await client.query(
+          `SELECT id FROM runs WHERE trigger='schedule' AND (started_at AT TIME ZONE 'Asia/Kolkata')::date=(now() AT TIME ZONE 'Asia/Kolkata')::date AND state IN ('completed','partial')`,
+        )
+      ).rowCount
+    )
+      return { skipped: true, reason: "Scheduled workflow already ran today" };
     await client.query("INSERT INTO runs(id,trigger) VALUES($1,$2)", [
       id,
       trigger,
     ]);
+    created = true;
     const cfg = await searchConfig();
-    try {
-      const payload = JSON.parse(
-        await runProcess(
-          process.env.PYTHON_BIN || "python",
-          ["scripts/scrape.py"],
-          { cwd: ROOT, input: JSON.stringify(cfg), timeout: 1200000 },
-        ),
-      );
-      errors.push(...payload.errors);
-      for (const job of payload.jobs) {
-        try {
-          if (recency(job.metadata) !== "fresh") {
-            errors.push(
-              "Job skipped: posting date outside the verified 24-hour window",
-            );
-            continue;
+    for (const site of cfg.sites) {
+      await phase(`Collecting ${site}`);
+      try {
+        const payload = JSON.parse(
+          await runProcess(
+            process.env.PYTHON_BIN || "python",
+            ["scripts/scrape.py"],
+            {
+              cwd: ROOT,
+              input: JSON.stringify({ ...cfg, sites: [site] }),
+              timeout: 180000,
+              signal: controller.signal,
+            },
+          ),
+        );
+        errors.push(...payload.errors);
+        for (const raw of payload.jobs) {
+          try {
+            await accept(raw);
+          } catch (e) {
+            errors.push(String(e));
           }
-          await ingest(job);
-          discovered++;
-        } catch (e) {
-          errors.push(String(e));
         }
+      } catch (e) {
+        errors.push(`${site}: ${String(e)}`);
       }
-    } catch (e) {
-      errors.push(`Job boards: ${String(e)}`);
     }
-    try {
-      const urls = await companyUrls();
-      let cursor = 0;
-      await Promise.all(
-        Array.from({ length: 3 }, async () => {
-          while (cursor < urls.length) {
-            const url = urls[cursor++];
-            try {
-              for (const j of await collectCompany(url)) {
-                try {
-                  if (recency(j.metadata) !== "fresh") {
-                    errors.push(
-                      `${url}: skipped old or unconfirmed-date posting`,
-                    );
-                    continue;
-                  }
-                  await ingest(j);
-                  discovered++;
-                } catch (e) {
-                  errors.push(`${url}: ${String(e)}`);
-                }
-              }
-            } catch (e) {
-              errors.push(`${url}: ${String(e)}`);
-            }
-            await pool.query(
-              "UPDATE runs SET discovered=$2,errors=$3 WHERE id=$1",
-              [id, discovered, JSON.stringify(errors)],
-            );
+    await phase("Collecting company jobs");
+    const urls = await companyUrls();
+    let cursor = 0;
+    const companyDeadline = Math.min(deadline, Date.now() + 5 * 60 * 1000);
+    await Promise.all(
+      Array.from({ length: 3 }, async () => {
+        while (
+          cursor < urls.length &&
+          !controller.signal.aborted &&
+          Date.now() < companyDeadline
+        ) {
+          const url = urls[cursor++];
+          try {
+            for (const j of await withSourceBudget(
+              () => collectCompany(url),
+              Math.min(20000, companyDeadline - Date.now()),
+              controller.signal,
+            ))
+              await accept(j);
+          } catch (e) {
+            errors.push(`${url}: ${String(e)}`);
           }
-        }),
+          await pool.query(
+            "UPDATE runs SET discovered=$2,filtered=$3,errors=$4,updated_at=now() WHERE id=$1",
+            [id, discovered, filtered, JSON.stringify(errors)],
+          );
+        }
+      }),
+    );
+    if (cursor < urls.length)
+      errors.push(
+        `Company scan time limit: ${urls.length - cursor} portals deferred to a later run`,
       );
-    } catch (e) {
-      errors.push(`Company workbook: ${String(e)}`);
+    await phase("Screening queued jobs");
+    const rows = (
+      await client.query(
+        `SELECT * FROM jobs WHERE manual=false AND (state='pending' OR (state='error' AND attempts<3)) ORDER BY created_at DESC LIMIT 1000`,
+      )
+    ).rows;
+    const eligible: any[] = [];
+    for (const job of rows) {
+      const screen = screenJob(job, cfg.maxRequiredExperienceYears);
+      if (!screen.eligible) {
+        await client.query(
+          `UPDATE jobs SET state='filtered',screening=$2,error=$3 WHERE id=$1`,
+          [job.id, screen, screen.reasons.join("; ")],
+        );
+        continue;
+      }
+      if (recency(job.metadata) !== "fresh") {
+        await client.query(
+          `UPDATE jobs SET state='skipped',error='Posting is outside the verified last 24 hours; not evaluated' WHERE id=$1`,
+          [job.id],
+        );
+        continue;
+      }
+      eligible.push(job);
     }
-    await client.query("UPDATE runs SET discovered=$2,errors=$3 WHERE id=$1", [
-      id,
-      discovered,
-      JSON.stringify(errors),
-    ]);
     const limit = Math.max(
       1,
       Math.min(100, Number(process.env.MAX_EVALUATIONS_PER_RUN) || 30),
     );
-    const { rows } = await client.query(
-      `SELECT * FROM jobs WHERE state='pending' OR (state='error' AND attempts<3) ORDER BY created_at DESC LIMIT 1000`,
-      [],
-    );
-    const cv = rows.length ? await resumeText() : "";
-    let attempted = 0;
-    for (const job of rows) {
-      const age = recency(job.metadata);
-      if (age !== "fresh") {
-        await client.query(
-          `UPDATE jobs SET state='skipped',error=$2 WHERE id=$1`,
-          [
-            job.id,
-            age === "old"
-              ? "Posting is older than 24 hours; not evaluated"
-              : "Exact posting date is unavailable; not evaluated",
-          ],
-        );
-        continue;
-      }
-      if (attempted >= limit) break;
-      attempted++;
-
+    const cv = eligible.length ? await resumeText() : "";
+    for (const [index, job] of eligible.slice(0, limit).entries()) {
+      check();
+      if (recency(job.metadata) !== "fresh") continue;
+      await phase(
+        `Evaluating ${index + 1}/${Math.min(eligible.length, limit)}: ${job.company}`,
+      );
+      await client.query("UPDATE jobs SET attempts=attempts+1 WHERE id=$1", [
+        job.id,
+      ]);
       try {
-        await client.query(`UPDATE jobs SET attempts=attempts+1 WHERE id=$1`, [
-          job.id,
-        ]);
-        const result = await evaluate(job, cv);
-        await client.query("BEGIN");
-        await client.query(
-          "INSERT INTO evaluations(job_id,result,content_hash) VALUES($1,$2,$3)",
-          [job.id, result, job.content_hash],
-        );
-        await client.query(
-          `UPDATE jobs SET state='evaluated',score=$2,decision=$3,evaluation=$4,error=NULL,evaluated_at=now(),updated_at=now() WHERE id=$1 AND content_hash=$5`,
-          [job.id, result.score, decision(result), result, job.content_hash],
-        );
-        await client.query("COMMIT");
+        const result = await evaluate(job, cv, {
+          signal: controller.signal,
+          timeout: Math.min(240000, deadline - Date.now()),
+        });
+        await saveEvaluation(client, job, result);
         evaluated++;
       } catch (e) {
-        await client.query("ROLLBACK");
         errors.push(`Evaluation ${job.id}: ${String(e)}`);
-        await client.query(
-          `UPDATE jobs SET state='error',error=$2 WHERE id=$1`,
-          [job.id, String(e)],
-        );
+        if (!disconnected)
+          await client.query(
+            `UPDATE jobs SET state='error',error=$2 WHERE id=$1`,
+            [job.id, String(e)],
+          );
       }
-      await client.query("UPDATE runs SET evaluated=$2,errors=$3 WHERE id=$1", [
-        id,
-        evaluated,
-        JSON.stringify(errors),
-      ]);
     }
+    await phase("Finished");
     await client.query(
-      "UPDATE runs SET state=$2,finished_at=now(),errors=$3 WHERE id=$1",
-      [id, errors.length ? "partial" : "completed", JSON.stringify(errors)],
+      `UPDATE runs SET state=$2,finished_at=now(),updated_at=now() WHERE id=$1`,
+      [id, errors.length ? "partial" : "completed"],
     );
-    return { id, discovered, evaluated, errors };
+    return { id, discovered, evaluated, filtered, errors };
   } catch (e) {
-    await client.query(
-      `UPDATE runs SET state='failed',finished_at=now(),errors=$2 WHERE id=$1`,
-      [id, JSON.stringify([...errors, String(e)])],
-    );
+    if (created && !disconnected)
+      await client.query(
+        `UPDATE runs SET state=$2,phase=$2,finished_at=now(),updated_at=now(),errors=$3 WHERE id=$1`,
+        [
+          id,
+          controller.signal.aborted ? "timed_out" : "failed",
+          JSON.stringify([...errors, String(e)]),
+        ],
+      );
     throw e;
   } finally {
-    await client.query("SELECT pg_advisory_unlock(7284519)");
-    client.release();
+    clearTimeout(timer);
+    client.off("error", onConnectionError);
+    try {
+      if (locked && !disconnected)
+        await client.query("SELECT pg_advisory_unlock($1)", [WORKFLOW_LOCK]);
+    } finally {
+      client.release(disconnected);
+    }
   }
 }
