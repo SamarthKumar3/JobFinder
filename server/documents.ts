@@ -7,6 +7,7 @@ import { DATA } from "./config";
 import { pool } from "./db";
 import { draft, draftResume, evaluate, type documentSchema } from "./ai";
 import { renderResume, type ResumeContent } from "./resume";
+import { artifactName } from "./artifact-name";
 export async function renderDocument(
   kind: "resume" | "cover",
   content: z.infer<typeof documentSchema> | ResumeContent,
@@ -102,9 +103,9 @@ export async function drainArtifacts() {
               kind === "resume"
                 ? await draftResume(job, job.evaluation)
                 : await draft("cover", job, job.evaluation);
-          const dir = path.join(DATA, "artifacts");
+          const dir = path.join(DATA, "artifacts", task.id);
           await fs.mkdir(dir, { recursive: true });
-          const filename = `${task.id}.${kind === "resume" ? "pdf" : "docx"}`;
+          const filename = artifactName(kind, job.company, job.title);
           const renderedText = await renderDocument(
             kind,
             content,
@@ -123,6 +124,7 @@ export async function drainArtifacts() {
               task.id,
               {
                 filename,
+                storageVersion: 2,
                 download_url: `/api/tasks/${task.id}/download`,
                 changes: content.changes,
                 remainingGaps: content.remainingGaps,

@@ -18,6 +18,7 @@ import {
 import { listJobs, querySchema } from "./jobs-query";
 import { createSubmission, drainSubmissions } from "./submissions";
 import { drainArtifacts } from "./documents";
+import { artifactName } from "./artifact-name";
 const app = express();
 app.disable("x-powered-by");
 app.use((req, res, next) => {
@@ -172,15 +173,18 @@ app.post("/api/jobs/:id/artifacts", async (req, res) => {
 });
 app.get("/api/tasks/:id/download", async (req, res) => {
   const task = (
-    await pool.query(`SELECT * FROM tasks WHERE id=$1 AND state='completed'`, [
-      uuid(req.params.id),
-    ])
+    await pool.query(
+      `SELECT t.*,j.company,j.title FROM tasks t JOIN jobs j ON j.id=t.job_id WHERE t.id=$1 AND t.state='completed'`,
+      [uuid(req.params.id)],
+    )
   ).rows[0];
   if (!task) return res.status(404).json({ error: "Artifact not ready" });
   const filename = path.basename(task.result.filename);
   res.download(
-    path.join(DATA, "artifacts", filename),
-    `Samarth_${task.kind}_${task.job_id.slice(0, 8)}.${task.kind === "resume" ? "pdf" : "docx"}`,
+    task.result.storageVersion === 2
+      ? path.join(DATA, "artifacts", task.id, filename)
+      : path.join(DATA, "artifacts", filename),
+    artifactName(task.kind, task.company, task.title),
   );
 });
 app.use("/api", (_req, res) => {
