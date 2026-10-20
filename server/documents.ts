@@ -1,18 +1,20 @@
 import type { PoolClient } from "pg";
 import fs from "node:fs/promises";
 import path from "node:path";
-import PDFDocument from "pdfkit";
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
 import { z } from "zod";
 import { DATA } from "./config";
 import { pool } from "./db";
-import { draft, evaluate, type documentSchema } from "./ai";
+import { draft, draftResume, evaluate, type documentSchema } from "./ai";
+import { renderResume, type ResumeContent } from "./resume";
 export async function renderDocument(
   kind: "resume" | "cover",
-  content: z.infer<typeof documentSchema>,
+  content: z.infer<typeof documentSchema> | ResumeContent,
   file: string,
 ) {
   if (kind === "cover") {
+    if (!("sections" in content))
+      throw new Error("Cover letter content is invalid");
     const paragraphs = [
       new Paragraph({ text: content.title, heading: HeadingLevel.TITLE }),
       ...content.sections.flatMap((s) => [
@@ -56,37 +58,9 @@ export async function renderDocument(
     });
     await fs.writeFile(file, await Packer.toBuffer(doc));
   } else {
-    const pdf = new PDFDocument({
-      size: "A4",
-      margin: 45,
-      info: { Title: content.title },
-    });
-    const chunks: Buffer[] = [];
-    pdf.on("data", (b) => chunks.push(b));
-    const done = new Promise<Buffer>((resolve, reject) => {
-      pdf.on("end", () => resolve(Buffer.concat(chunks)));
-      pdf.on("error", reject);
-    });
-    pdf.font("Helvetica-Bold").fontSize(17).text(content.title).moveDown(0.6);
-    for (const section of content.sections) {
-      if (section.heading) {
-        if (pdf.y > 720) pdf.addPage();
-        pdf
-          .font("Helvetica-Bold")
-          .fontSize(11)
-          .text(section.heading)
-          .moveDown(0.3);
-      }
-      for (const p of section.paragraphs)
-        pdf
-          .font("Helvetica")
-          .fontSize(10)
-          .text(p.text, { lineGap: 2 })
-          .moveDown(0.5);
-      pdf.moveDown(0.3);
-    }
-    pdf.end();
-    await fs.writeFile(file, await done);
+    if (!("edits" in content))
+      throw new Error("Resume must use the original PDF template");
+    return renderResume(content, file);
   }
 }
 let active = false;
@@ -124,20 +98,25 @@ export async function drainArtifacts() {
               "Job needs a completed evaluation and score of at least 2",
             );
           const kind = task.kind as "resume" | "cover",
-            content = await draft(kind, job, job.evaluation);
+            content =
+              kind === "resume"
+                ? await draftResume(job, job.evaluation)
+                : await draft("cover", job, job.evaluation);
           const dir = path.join(DATA, "artifacts");
           await fs.mkdir(dir, { recursive: true });
           const filename = `${task.id}.${kind === "resume" ? "pdf" : "docx"}`;
-          await renderDocument(kind, content, path.join(dir, filename));
+          const renderedText = await renderDocument(
+            kind,
+            content,
+            path.join(dir, filename),
+          );
+          // Retain structured edits for faithful re-rendering without another AI call.
+          await fs.writeFile(
+            path.join(dir, `${task.id}.json`),
+            JSON.stringify(content),
+          );
           const tailoredEvaluation =
-            kind === "resume"
-              ? await evaluate(
-                  job,
-                  content.sections
-                    .flatMap((s) => s.paragraphs.map((p) => p.text))
-                    .join("\n"),
-                )
-              : null;
+            kind === "resume" ? await evaluate(job, renderedText) : null;
           await client.query(
             `UPDATE tasks SET state='completed',result=$2,finished_at=now() WHERE id=$1`,
             [

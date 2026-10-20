@@ -6,6 +6,12 @@ import pdf from "pdf-parse/lib/pdf-parse.js";
 import { DATA, OPS, searchConfig } from "./config";
 import { runProcess } from "./process";
 import { evaluationSchema, type Evaluation } from "./domain";
+import {
+  resumeSchema,
+  resumeTemplate,
+  resumeWorker,
+  validateResumeEdits,
+} from "./resume";
 
 export async function resumeText() {
   const parsed = await pdf(
@@ -135,22 +141,16 @@ export const documentSchema = z.object({
   changes: z.array(z.string()),
   remainingGaps: z.array(z.string()),
 });
-export async function draft(
-  kind: "resume" | "cover",
-  job: unknown,
-  evaluation: unknown,
-) {
+export async function draft(kind: "cover", job: unknown, evaluation: unknown) {
   const cv = await resumeText(),
     cfg = await searchConfig();
   const result = await ask(
     documentSchema,
-    `You are Career Ops. ${await rules(["modes/_shared.md", "modes/_writing.md", kind === "resume" ? "modes/pdf.md" : "modes/cover.md"])}\nCreate ${kind === "resume" ? "an ATS readable tailored resume aiming to maximize honest fit" : "a concise professional cover letter suitable for Word"}. Return plain text structured into sections. Preserve contact information, employers, dates, education and factual accomplishments for a resume. Use only facts from supplied original CV. Every factual paragraph MUST include verbatim source excerpts in evidence; nonfactual salutation or expression of interest can have an empty evidence list. Do not fabricate skills, metrics, salary, experience, work authorization or project ownership. This is a draft for user review, not an approved application. No tools. Do not promise a perfect score; remainingGaps must describe unfixable gaps.`,
+    `You are Career Ops. ${await rules(["modes/_shared.md", "modes/_writing.md", "modes/cover.md"])}\nCreate a concise professional cover letter suitable for Word. Return plain text structured into sections. Use only facts from supplied original CV. Every factual paragraph MUST include verbatim source excerpts in evidence; nonfactual salutation or expression of interest can have an empty evidence list. Do not fabricate skills, metrics, salary, experience, work authorization or project ownership. This is a draft for user review, not an approved application. No tools. Do not promise a perfect score; remainingGaps must describe unfixable gaps.`,
     { cv, job, evaluation, targeting: cfg.targeting },
   );
   for (const section of result.sections)
     for (const p of section.paragraphs) {
-      if (kind === "resume" && p.text.trim() && !p.evidence.length)
-        throw new Error("Resume paragraph has no source evidence");
       for (const evidence of p.evidence) {
         if (
           !evidence.trim() ||
@@ -162,4 +162,45 @@ export async function draft(
       }
     }
   return result;
+}
+
+export async function draftResume(job: unknown, evaluation: unknown) {
+  const template = await resumeTemplate(),
+    cfg = await searchConfig();
+  let feedback = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await ask(
+      resumeSchema,
+      `You are Career Ops. ${await rules(["modes/_shared.md", "modes/_writing.md", "modes/pdf.md"])}
+Tailor the original resume IN PLACE. The user's original PDF is the immutable layout template. Return exactly one edit for every supplied slot ID, in original order. Do not add sections, headings, contact details, labels, employers, dates or a draft/review banner. Static header, links, section rules, roles, dates, education and certifications are preserved by the renderer.
+Each slot is ONE original summary paragraph, bullet or skill category. Keep each fact with its original employer/project, retain metrics, and only use facts supported by THAT slot. Every edit needs verbatim evidence from that slot's original text. Preserve each skill category label. Rephrase/reorder words within the slot for honest job relevance; do not move bullets or invent skills, seniority, qualifications or accomplishments. Keep existing facts even if they are not relevant to this job.
+Text MUST be plain text, with no Markdown or HTML. Supply exact relevant keyword substrings in boldKeywords, especially technical terms, tools and role-relevant skills. Bold skill category labels as well. Do not bold entire paragraphs. Use natural wording, not keyword stuffing.
+STRICT SPACE: each edit must fit its original maxLines at the original font size with bold keywords. Aim for at most 85-90% of the original character count when rewriting to leave space for bold text. Never truncate facts to fit; retain the original wording if needed. The renderer rejects overflow instead of shrinking fonts or moving sections. Never include the word Draft in the resume. A 5.0 score is a target, not a promise; report unresolved gaps outside the resume in remainingGaps. User layout instructions override conflicting upstream defaults. No tools.`,
+      {
+        cv: template.cv,
+        slots: template.slots.map(
+          ({ id, section, context, text, maxLines }) => ({
+            id,
+            section,
+            context,
+            text,
+            maxLines,
+          }),
+        ),
+        job,
+        evaluation,
+        targeting: cfg.targeting,
+        layoutFeedback: feedback,
+      },
+    );
+    try {
+      validateResumeEdits(result, template);
+      await resumeWorker("check", result);
+      return result;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      feedback = `Previous response failed validation: ${String(error)}. Return a complete corrected response. Preserve all original facts, IDs and formatting constraints.`;
+    }
+  }
+  throw new Error("Resume layout validation failed");
 }

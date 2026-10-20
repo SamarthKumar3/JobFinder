@@ -42,7 +42,9 @@ All discovered complete jobs are stored **before** evaluation. Automatic results
 - `Needs review`: pending/error jobs and upstream confirmation gates. Read the reported question, save your answer in the modal, then run the workflow. Confirmation gates do not receive a score.
 - `All jobs`: every persisted job.
 
-Scores 2–5 expose background actions for a tailored PDF resume and a Word `.docx` cover letter. Generated factual paragraphs include source evidence, checked against the original resume before rendering. This is a provenance check, not a complete semantic fact guarantee: review every draft. The tailored resume is independently rescored and the result shown next to its download. Original fit score remains unchanged. 5.0 is a target, never guaranteed; genuine experience, location or pay gaps cannot be rewritten away. Downloads plus the application URL are available in the modal. Nothing submits applications or contacts employers.
+Scores 2–5 expose background actions for a tailored PDF resume and a Word `.docx` cover letter. Resume generation uses the original PDF as its layout template: page size/count, Times New Roman typography, header, ruled headings, bullet positions, employers, dates, education and clickable links are preserved. Career Ops edits the original summary, bullets and skill categories in place and supplies relevant keywords to render in bold. No draft banner is added. Every edited paragraph must fit its original line budget at the original font size; overflow triggers correction or a visible failure, never smaller fonts or moved sections. Structured content is retained locally beside the PDF for re-rendering.
+
+Generated factual paragraphs include source evidence; resume evidence is checked against its own original paragraph so facts stay with their employer/project. This is a provenance check, not a complete semantic fact guarantee: review every generated document. The tailored resume is independently rescored from the rendered PDF text and the result shown next to its download. Original fit score remains unchanged. 5.0 is a target, never guaranteed; genuine experience, location or pay gaps cannot be rewritten away. Downloads plus the application URL are available in the modal. Nothing submits applications or contacts employers.
 
 ## Schedule and operation
 
@@ -71,6 +73,7 @@ One filtered endpoint: `GET /api/jobs?tab=apply|rejected|pending|all&q=...&offse
 
 ```powershell
 npm test
+.venv/Scripts/python.exe -X utf8 -m unittest discover -s tests -p resume_pdf_test.py -v
 npm run build
 npx tsx tests/integration.ts
 npm run workflow
@@ -81,6 +84,7 @@ Postgres data is in the `jobfinder_jobfinder_pg` named volume. Back it up with `
 ## Verification on the development machine
 
 - TypeScript production build and behavior tests passed, including the strict 24-hour cutoff.
+- PDF regression checks cover unchanged header pixels, page count, font size, rules, bullets, clickable links, bold keywords, plain-text extraction and rejection of overflowing or incomplete edits.
 - PostgreSQL integration verified duplicate URLs, unchanged-job score retention, changed-description invalidation, 65-row pagination/facets, exact filters, multi-city matches, pre-screen exclusions and stale-run reconciliation.
 - Public LinkedIn, Indeed and Naukri collectors were exercised. The final strict-window smoke search returned fresh LinkedIn/Naukri jobs and no fresh Indeed jobs for that query.
 - Authenticated Codex evaluation was exercised on real postings after explicit user approval for sending the resume to Codex.
