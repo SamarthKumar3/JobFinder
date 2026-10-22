@@ -11,5 +11,5 @@ export function evaluationDate(value?: string | null) {
   }).formatToParts(new Date(value));
   const part = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find((p) => p.type === type)?.value;
-  return `${part("hour")}:${part("minute")} ${part("dayPeriod")} ${part("day")} ${part("month")}. ${part("year")}.`;
+  return `${part("hour")}:${part("minute")} ${part("dayPeriod")}\n${part("day")} ${part("month")}. ${part("year")}.`;
 }

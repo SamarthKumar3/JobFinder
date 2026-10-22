@@ -11,11 +11,11 @@ import { withSourceBudget } from "../server/company";
 test("evaluation dates use the requested clock/date format in India regardless of host timezone", () => {
   assert.equal(
     evaluationDate("2026-10-22T18:05:00Z"),
-    "11:35 PM 22 Oct. 2026.",
+    "11:35 PM\n22 Oct. 2026.",
   );
   assert.equal(
     evaluationDate("2026-10-22T20:00:00Z"),
-    "01:30 AM 23 Oct. 2026.",
+    "01:30 AM\n23 Oct. 2026.",
   );
   assert.equal(evaluationDate(null), "—");
 });

@@ -401,7 +401,10 @@ dialog::backdrop {
 .date-cell {
   min-width: 190px;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  white-space: pre-line;
+}
+.metadata time {
+  white-space: pre-line;
 }
 .application-actions {
   display: flex;
