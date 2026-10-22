@@ -37,10 +37,12 @@ Alternatively set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL` and opt
 
 All discovered complete jobs are stored **before** evaluation. Automatic results pass a deterministic pre-screen before entering the Career Ops queue: target engineering titles and relevant technology, no senior/lead/architect/management positions, explicit minimum experience at most 2 years, junior bands including 0–1, 0–2 and 0–3 years and fractional requirements below 1 year are accepted, as are 1+ and 2+ requirements; explicit fresher-only roles are excluded, no internships/contracts and no disclosed INR salary ceiling below 20 LPA. The experience margin is configurable with `maxRequiredExperienceYears`. Rejected pre-screen records are retained with reasons as `state=filtered` and excluded from job views; existing evaluations are preserved. The pre-screen is also applied to existing records at startup and rechecked immediately before automatic evaluation. URL normalization deduplicates repeated scans, content changes queue rescoring, and every successful evaluation is retained in `evaluations`. Errors retry up to three daily runs, with a manual retry control, only while the posting remains within the 24-hour window. The cap is 30 evaluations per run by default; backlog remains in Needs review until evaluated or skipped after aging out.
 
-- `Apply`: completed evaluation, score **strictly greater than 4**, Career Ops recommends apply and no blockers.
-- `Rejected`: other completed non-confirmation decisions, including exactly 4.0.
-- `Needs review`: pending/error jobs and upstream confirmation gates. Read the reported question, save your answer in the modal, then run the workflow. Confirmation gates do not receive a score.
+- `Apply`: completed evaluation, score **strictly greater than 4**, Career Ops recommends apply and no blockers, unless marked Did not apply.
+- `Rejected`: other completed non-confirmation decisions, including exactly 4.0, plus any job marked Did not apply.
+- `Needs review`: pending/error jobs and upstream confirmation gates, excluding Did not apply. Read the reported question, save your answer in the modal, then run the workflow. Confirmation gates do not receive a score.
 - `All jobs`: every persisted job.
+
+Job rows and submitted URLs show the actual evaluation timestamp in Asia/Kolkata, for example `11:35 PM 22 Oct. 2026.`, newest evaluations first. Unevaluated jobs display a dash and sort after evaluated jobs. The tick records Applied and the cross records Did not apply. These choices are stored independently from Career Ops decisions and survive re-scans and restarts; neither is selected by default. Marking Did not apply removes the job from Apply/Needs review and includes it in Rejected. Marking Applied restores its ordinary Career Ops category. Explicitly tracked jobs remain visible even if a later pre-screen filters their updated description. Automatic evaluations skip jobs with either saved application status.
 
 Scores 2–5 expose background actions for a tailored PDF resume and a Word `.docx` cover letter. Resume generation uses the original PDF as its layout template: page size/count, Times New Roman typography, header, ruled headings, bullet positions, employers, dates, education and clickable links are preserved. Career Ops edits the original summary, bullets and skill categories in place and supplies relevant keywords to render in bold. No draft banner is added. Every edited paragraph must fit its original line budget at the original font size; overflow triggers correction or a visible failure, never smaller fonts or moved sections. Structured content is retained locally beside the PDF for re-rendering.
 
@@ -67,7 +69,9 @@ The dashboard has no interval polling. Initial loads, user changes to views/filt
 
 **Evaluate URL** submits an individual posting through `POST /api/submissions` with `{url}`. Public Naukri links use JobSpy's individual-job transport; structured job pages and public LinkedIn pages have HTML extractors. If a site blocks extraction, the form accepts user-pasted title, company, location and description. User-selected URL jobs deliberately bypass automatic search screening/recency and use the same Career Ops evaluation, job-detail component, PDF resume and Word cover-letter actions. Confirmation gates still require a user answer. `GET /api/submissions` exposes recent submission states; Refresh retrieves completed results. Descriptions and resume text are only sent to the configured, user-approved AI provider.
 
-Workflow rows carry phases and counts. Startup and manual status refresh reconcile a stale `running` record when no worker holds the workflow advisory lock. Scans have a 30-minute deadline, each board worker a 3-minute deadline, and company discovery a 5-minute total budget / 20-second source budget. Slow portals are reported as partial coverage; scans do not wait indefinitely. Owned subprocesses are terminated on cancellation/timeouts.
+**Workflow history & source diagnostics** is a separate table tab with start/finish dates, status, phase, counts and expandable source messages. `GET /api/runs?offset=0` returns history in pages of 50, newest first. Refresh is manual; there is no background database polling. Startup and manual status refresh reconcile a stale `running` record when no worker holds the workflow advisory lock. Scans have a 30-minute deadline, each board worker a 3-minute deadline, and company discovery a 5-minute total budget / 20-second source budget. Company source budgets also bound stalled provider/DNS operations. The evaluation loop reserves a full four-minute worker window plus 15 seconds to persist results and finish; when insufficient time remains, it completes as partial and leaves unattempted jobs queued. Recency is rechecked before future evaluations. Worker-folder cleanup retries transient Windows locks and cannot mask a valid result or the original worker error. Owned subprocesses are terminated on cancellation/timeouts.
+
+`POST /api/jobs/:id/application-status` accepts `{"status":"applied"}` or `{"status":"did_not_apply"}`. Changing application status preserves the evaluation score and timestamp.
 
 One filtered endpoint: `GET /api/jobs?tab=apply|rejected|pending|all&q=...&offset=0` (50 rows per page). Job details: `GET /api/jobs/:id`. Workflow: `POST /api/run`. Artifact queue: `POST /api/jobs/:id/artifacts` with `{"kind":"resume"}` or `{"kind":"cover"}`. Import: `POST /api/jobs/import` with an array of `{title,company,location,source,apply_url,description,metadata}`. All POSTs require `Content-Type: application/json` and `X-JobFinder-Request: 1`.
 
@@ -76,6 +80,7 @@ npm test
 .venv/Scripts/python.exe -X utf8 -m unittest discover -s tests -p resume_pdf_test.py -v
 npm run build
 npx tsx tests/integration.ts
+npx tsx tests/tracking-integration.ts
 npm run workflow
 ```
 

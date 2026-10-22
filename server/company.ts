@@ -16,7 +16,36 @@ export function withSourceBudget<T>(
   timeout = 20000,
   signal?: AbortSignal,
 ) {
-  return sourceBudget.run({ deadline: Date.now() + timeout, signal }, work);
+  const controller = new AbortController();
+  const combined = signal
+    ? AbortSignal.any([signal, controller.signal])
+    : controller.signal;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (failed: boolean, value: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      combined.removeEventListener("abort", aborted);
+      failed ? reject(value) : resolve(value as T);
+    };
+    const aborted = () =>
+      finish(true, combined.reason || new Error("Company source cancelled"));
+    const timer = setTimeout(
+      () => controller.abort(new Error("Company source time limit reached")),
+      Math.max(1, timeout),
+    );
+    combined.addEventListener("abort", aborted, { once: true });
+    if (combined.aborted) return aborted();
+    sourceBudget
+      .run({ deadline: Date.now() + timeout, signal: combined }, () =>
+        Promise.resolve().then(work),
+      )
+      .then(
+        (value) => finish(false, value),
+        (error) => finish(true, error),
+      );
+  });
 }
 export function publicIp(ip: string) {
   if (net.isIP(ip) !== 4) return false;

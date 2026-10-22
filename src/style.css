@@ -398,6 +398,43 @@ dialog::backdrop {
 .jobrow {
   cursor: pointer;
 }
+.date-cell {
+  min-width: 190px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.application-actions {
+  display: flex;
+  gap: 6px;
+}
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  min-width: 40px;
+  min-height: 40px;
+}
+.icon-button.chosen.applied {
+  background: #e4f3ed;
+  color: #156145;
+  border-color: #156145;
+}
+.icon-button.chosen.did_not_apply {
+  background: #fff1ee;
+  color: #8c2f22;
+  border-color: #8c2f22;
+}
+.run-diagnostics {
+  min-width: 220px;
+  max-width: 440px;
+}
+.run-diagnostics ul {
+  max-height: 320px;
+  overflow: auto;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
 .jobrow:hover td {
   background: #f0f6fa;
 }

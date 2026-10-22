@@ -39,6 +39,10 @@ export async function migrate() {
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS locations text[] NOT NULL DEFAULT '{}';
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS manual boolean NOT NULL DEFAULT false;
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS screening jsonb;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS application_status text CHECK(application_status IN ('applied','did_not_apply'));
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS application_status_updated_at timestamptz;
+    UPDATE jobs j SET evaluated_at=(SELECT max(e.created_at) FROM evaluations e WHERE e.job_id=j.id AND e.content_hash=j.content_hash)
+      WHERE j.evaluated_at IS NULL AND j.state='evaluated';
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT 'starting';
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS filtered integer NOT NULL DEFAULT 0;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
@@ -51,5 +55,6 @@ export async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS active_artifact ON tasks(job_id,kind) WHERE state IN ('queued','running');
     CREATE INDEX IF NOT EXISTS jobs_score ON jobs(score DESC,created_at DESC);
     CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state);
+    CREATE INDEX IF NOT EXISTS jobs_evaluated ON jobs(evaluated_at DESC NULLS LAST,created_at DESC,id);
   `);
 }

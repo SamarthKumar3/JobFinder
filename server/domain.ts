@@ -64,9 +64,12 @@ export function contentHash(j: IncomingJob) {
 export function filterClause(tab: string) {
   const clauses: Record<string, string> = {
     all: "TRUE",
-    apply: "state='evaluated' AND decision='apply'",
-    rejected: "state='evaluated' AND decision='rejected'",
-    pending: "state IN ('pending','error') OR decision='review'",
+    apply:
+      "state='evaluated' AND decision='apply' AND application_status IS DISTINCT FROM 'did_not_apply'",
+    rejected:
+      "application_status='did_not_apply' OR (state='evaluated' AND decision='rejected')",
+    pending:
+      "(state IN ('pending','error') OR decision='review') AND application_status IS DISTINCT FROM 'did_not_apply'",
   };
   if (!clauses[tab]) throw new Error("Unknown tab");
   return clauses[tab];

@@ -17,6 +17,7 @@ import { runProcess } from "./process";
 import { collectCompany, withSourceBudget } from "./company";
 import { evaluate, resumeText } from "./ai";
 import { screenJob, normalizedLocations } from "./screening";
+import { canStartEvaluation, EVALUATION_TIMEOUT_MS } from "./workflow-budget";
 export const WORKFLOW_LOCK = 7284519;
 export async function ingest(raw: unknown, manual = false) {
   const j = jobSchema.parse(raw),
@@ -38,6 +39,7 @@ export async function ingest(raw: unknown, manual = false) {
     score=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.score END,
     decision=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.decision END,
     evaluation=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.evaluation END,
+    evaluated_at=CASE WHEN jobs.content_hash<>excluded.content_hash THEN NULL ELSE jobs.evaluated_at END,
     content_hash=excluded.content_hash,updated_at=now() RETURNING id`,
     [
       randomUUID(),
@@ -285,7 +287,7 @@ export async function runWorkflow(trigger = "manual") {
     await phase("Screening queued jobs");
     const rows = (
       await client.query(
-        `SELECT * FROM jobs WHERE manual=false AND (state='pending' OR (state='error' AND attempts<3)) ORDER BY created_at DESC LIMIT 1000`,
+        `SELECT * FROM jobs WHERE manual=false AND application_status IS NULL AND (state='pending' OR (state='error' AND attempts<3)) ORDER BY created_at DESC LIMIT 1000`,
       )
     ).rows;
     const eligible: any[] = [];
@@ -312,19 +314,27 @@ export async function runWorkflow(trigger = "manual") {
       Math.min(100, Number(process.env.MAX_EVALUATIONS_PER_RUN) || 30),
     );
     const cv = eligible.length ? await resumeText() : "";
+    let attempted = 0;
     for (const [index, job] of eligible.slice(0, limit).entries()) {
       check();
       if (recency(job.metadata) !== "fresh") continue;
+      if (!canStartEvaluation(deadline)) {
+        errors.push(
+          `Evaluation time budget reached: ${eligible.length - attempted} jobs remain queued. They will be checked for recency again before evaluation.`,
+        );
+        break;
+      }
       await phase(
         `Evaluating ${index + 1}/${Math.min(eligible.length, limit)}: ${job.company}`,
       );
       await client.query("UPDATE jobs SET attempts=attempts+1 WHERE id=$1", [
         job.id,
       ]);
+      attempted++;
       try {
         const result = await evaluate(job, cv, {
           signal: controller.signal,
-          timeout: Math.min(240000, deadline - Date.now()),
+          timeout: EVALUATION_TIMEOUT_MS,
         });
         await saveEvaluation(client, job, result);
         evaluated++;
@@ -337,6 +347,10 @@ export async function runWorkflow(trigger = "manual") {
           );
       }
     }
+    if (eligible.length > limit && attempted === limit)
+      errors.push(
+        `Evaluation limit reached: ${eligible.length - limit} jobs remain queued.`,
+      );
     await phase("Finished");
     await client.query(
       `UPDATE runs SET state=$2,finished_at=now(),updated_at=now() WHERE id=$1`,

@@ -71,7 +71,16 @@ export async function ask<T extends z.ZodType>(
       );
       raw = await fs.readFile(output, "utf8");
     } finally {
-      await fs.rm(dir, { recursive: true, force: true });
+      // Windows can briefly retain a worker's current-directory/file handles.
+      // Cleanup must never replace an otherwise valid result or original error.
+      await fs
+        .rm(dir, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+          retryDelay: 150,
+        })
+        .catch((error) => console.warn("Worker cleanup deferred:", error.code));
     }
   } else {
     if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_MODEL)

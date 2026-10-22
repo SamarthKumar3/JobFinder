@@ -16,7 +16,7 @@ export function jobWhere(
 ) {
   const values: unknown[] = [`%${query.q}%`];
   const parts = [
-    `state <> 'filtered'`,
+    `(state <> 'filtered' OR application_status IS NOT NULL)`,
     `(${filterClause(query.tab)})`,
     `(title ILIKE $1 OR company ILIKE $1 OR location ILIKE $1)`,
   ];
@@ -34,7 +34,7 @@ export function jobWhere(
 export async function listJobs(query: JobQuery) {
   const where = jobWhere(query);
   const result = await pool.query(
-    `SELECT id,title,company,location,source,apply_url,score,decision,state,error,created_at FROM jobs WHERE ${where.sql} ORDER BY score DESC NULLS LAST,created_at DESC LIMIT 50 OFFSET $${where.values.length + 1}`,
+    `SELECT id,title,company,location,source,apply_url,score,decision,state,error,created_at,evaluated_at,application_status,application_status_updated_at FROM jobs WHERE ${where.sql} ORDER BY evaluated_at DESC NULLS LAST,created_at DESC,id LIMIT 50 OFFSET $${where.values.length + 1}`,
     [...where.values, query.offset],
   );
   const total = (

@@ -57,11 +57,11 @@ app.get("/api/health", async (_req, res) => {
 app.get("/api/status", async (_req, res) => {
   await reconcileWorkflowRuns();
   const counts = (
-    await pool.query(`SELECT count(*) FILTER(WHERE state<>'filtered')::int AS all,
+    await pool.query(`SELECT count(*) FILTER(WHERE state<>'filtered' OR application_status IS NOT NULL)::int AS all,
     count(*) FILTER(WHERE state='filtered')::int AS filtered,
-    count(*) FILTER(WHERE state='evaluated' AND decision='apply')::int AS apply,
-    count(*) FILTER(WHERE state='evaluated' AND decision='rejected')::int AS rejected,
-    count(*) FILTER(WHERE state<>'filtered' AND (state IN ('pending','error') OR decision='review'))::int AS pending FROM jobs`)
+    count(*) FILTER(WHERE (state<>'filtered' OR application_status IS NOT NULL) AND (${filterClause("apply")}))::int AS apply,
+    count(*) FILTER(WHERE (state<>'filtered' OR application_status IS NOT NULL) AND (${filterClause("rejected")}))::int AS rejected,
+    count(*) FILTER(WHERE (state<>'filtered' OR application_status IS NOT NULL) AND (${filterClause("pending")}))::int AS pending FROM jobs`)
   ).rows[0];
   const runs = (
     await pool.query("SELECT * FROM runs ORDER BY started_at DESC LIMIT 8")
@@ -78,11 +78,26 @@ app.get("/api/status", async (_req, res) => {
 app.get("/api/jobs", async (req, res) => {
   res.json(await listJobs(querySchema.parse(req.query)));
 });
+app.get("/api/runs", async (req, res) => {
+  const offset = z.coerce
+    .number()
+    .int()
+    .min(0)
+    .parse(req.query.offset || 0);
+  const [runs, count] = await Promise.all([
+    pool.query(
+      "SELECT * FROM runs ORDER BY started_at DESC,id LIMIT 50 OFFSET $1",
+      [offset],
+    ),
+    pool.query("SELECT count(*)::int AS total FROM runs"),
+  ]);
+  res.json({ runs: runs.rows, total: count.rows[0].total });
+});
 app.get("/api/submissions", async (_req, res) => {
   res.json({
     submissions: (
       await pool.query(
-        `SELECT s.id,s.url,s.state,s.job_id,s.error,s.created_at,s.finished_at,j.title,j.company,j.score FROM submissions s LEFT JOIN jobs j ON j.id=s.job_id ORDER BY s.created_at DESC LIMIT 50`,
+        `SELECT s.id,s.url,s.state,s.job_id,s.error,s.created_at,s.finished_at,j.title,j.company,j.score,j.evaluated_at,j.application_status FROM submissions s LEFT JOIN jobs j ON j.id=s.job_id ORDER BY j.evaluated_at DESC NULLS LAST,s.created_at DESC,s.id LIMIT 50`,
       )
     ).rows,
   });
@@ -109,9 +124,18 @@ app.post("/api/jobs/import", async (req, res) => {
   for (const job of jobs) ids.push(await ingest(job));
   res.status(201).json({ ids });
 });
+app.post("/api/jobs/:id/application-status", async (req, res) => {
+  const status = z.enum(["applied", "did_not_apply"]).parse(req.body.status);
+  const result = await pool.query(
+    "UPDATE jobs SET application_status=$2,application_status_updated_at=now() WHERE id=$1 RETURNING id,application_status,application_status_updated_at",
+    [uuid(req.params.id), status],
+  );
+  if (!result.rowCount) return res.status(404).json({ error: "Job not found" });
+  res.json(result.rows[0]);
+});
 app.post("/api/jobs/:id/retry", async (req, res) => {
   const result = await pool.query(
-    `UPDATE jobs SET state='pending',attempts=0,error=NULL,score=NULL,decision=NULL WHERE id=$1 RETURNING *`,
+    `UPDATE jobs SET state='pending',attempts=0,error=NULL,score=NULL,decision=NULL,evaluated_at=NULL WHERE id=$1 RETURNING *`,
     [uuid(req.params.id)],
   );
   if (!result.rowCount) return res.status(404).json({ error: "Job not found" });
@@ -130,7 +154,7 @@ app.post("/api/jobs/:id/confirm", async (req, res) => {
   const id = uuid(req.params.id),
     answer = z.string().trim().min(3).max(2000).parse(req.body.answer);
   const result = await pool.query(
-    `UPDATE jobs SET metadata=jsonb_set(metadata,'{candidate_confirmation}',to_jsonb($2::text)),state='pending',attempts=0,score=NULL,decision=NULL,error=NULL WHERE id=$1 AND decision='review' RETURNING *`,
+    `UPDATE jobs SET metadata=jsonb_set(metadata,'{candidate_confirmation}',to_jsonb($2::text)),state='pending',attempts=0,score=NULL,decision=NULL,evaluated_at=NULL,error=NULL WHERE id=$1 AND decision='review' RETURNING *`,
     [id, answer],
   );
   if (!result.rowCount)
