@@ -7,14 +7,18 @@ import { pathToFileURL } from "node:url";
 import { OPS } from "./config";
 import { load } from "cheerio";
 import { recency, type IncomingJob } from "./domain";
+import { collectWorkday, workdayBoard } from "./workday";
+export type CompanyJobs = IncomingJob[] & { diagnostics?: string[] };
 const sourceBudget = new AsyncLocalStorage<{
   deadline: number;
   signal?: AbortSignal;
+  boards: Map<string, Promise<CompanyJobs>>;
 }>();
 export function withSourceBudget<T>(
   work: () => Promise<T>,
   timeout = 20000,
   signal?: AbortSignal,
+  boards = new Map<string, Promise<CompanyJobs>>(),
 ) {
   const controller = new AbortController();
   const combined = signal
@@ -38,7 +42,7 @@ export function withSourceBudget<T>(
     combined.addEventListener("abort", aborted, { once: true });
     if (combined.aborted) return aborted();
     sourceBudget
-      .run({ deadline: Date.now() + timeout, signal: combined }, () =>
+      .run({ deadline: Date.now() + timeout, signal: combined, boards }, () =>
         Promise.resolve().then(work),
       )
       .then(
@@ -150,9 +154,26 @@ const plain = (text: string) => load(text).text().trim();
 export async function collectCompany(
   url: string,
   depth = 0,
-): Promise<IncomingJob[]> {
+): Promise<CompanyJobs> {
   const u = new URL(url),
     parts = u.pathname.split("/").filter(Boolean);
+  const board = workdayBoard(url);
+  if (board) {
+    const cache = sourceBudget.getStore()?.boards;
+    const existing = cache?.get(board.key);
+    if (existing) return existing;
+    const budget = sourceBudget.getStore();
+    const pending = collectWorkday(
+      url,
+      (raw, opts) => safeGet(raw, 0, opts),
+      Date.now(),
+      () =>
+        !budget ||
+        (!budget.signal?.aborted && Date.now() < budget.deadline - 1000),
+    );
+    cache?.set(board.key, pending);
+    return pending;
+  }
   const upstream = await upstreamCompany(url);
   if (upstream !== null) return upstream;
   let api = url,
@@ -225,6 +246,7 @@ export async function collectCompany(
             "jobs.ashbyhq.com",
           ].includes(target.hostname) ||
           target.hostname.endsWith(".myworkdayjobs.com") ||
+          target.hostname.endsWith(".myworkdaysite.com") ||
           target.hostname.endsWith(".eightfold.ai") ||
           target.hostname === "jobs.smartrecruiters.com";
         const same = target.hostname === u.hostname;
@@ -234,7 +256,7 @@ export async function collectCompany(
           (same && /jobs?|careers?|positions?|openings?|vacanc/i.test(label))
         )
           candidates.set(
-            target.href,
+            workdayBoard(target.href)?.base || target.href,
             ats
               ? 10
               : /engineer|artificial|intelligence|python|software|india|pune|bangalore|bengaluru|gurugram/i.test(
@@ -246,14 +268,22 @@ export async function collectCompany(
       } catch {}
     });
     const found: IncomingJob[] = [];
+    const diagnostics: string[] = [];
     for (const [link] of [...candidates]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)) {
       try {
-        found.push(...(await collectCompany(link, 1)));
-      } catch {}
+        const rows = await collectCompany(link, 1);
+        found.push(...rows);
+        diagnostics.push(
+          ...(rows.diagnostics || []).map((message) => `${link}: ${message}`),
+        );
+      } catch (error) {
+        diagnostics.push(`${link}: ${String(error)}`);
+      }
     }
-    if (found.length) return found;
+    if (found.length || diagnostics.length)
+      return Object.assign(found, { diagnostics: [...new Set(diagnostics)] });
   }
   if (!nodes.length)
     throw new Error(
@@ -290,8 +320,7 @@ async function upstreamCompany(url: string): Promise<IncomingJob[] | null> {
     provider = "amazon";
     entry.name = "Amazon";
     entry.amazon = { loc_query: "India", base_query: "software engineer" };
-  } else if (u.hostname.endsWith(".myworkdayjobs.com")) provider = "workday";
-  else if (u.hostname.endsWith(".eightfold.ai")) provider = "eightfold";
+  } else if (u.hostname.endsWith(".eightfold.ai")) provider = "eightfold";
   else if (u.hostname === "jobs.smartrecruiters.com")
     provider = "smartrecruiters";
   else return null;

@@ -14,7 +14,7 @@ import {
 } from "./domain";
 import { ROOT, searchConfig } from "./config";
 import { runProcess } from "./process";
-import { collectCompany, withSourceBudget } from "./company";
+import { collectCompany, withSourceBudget, type CompanyJobs } from "./company";
 import { evaluate, resumeText } from "./ai";
 import { screenJob, normalizedLocations } from "./screening";
 import { canStartEvaluation, EVALUATION_TIMEOUT_MS } from "./workflow-budget";
@@ -254,6 +254,7 @@ export async function runWorkflow(trigger = "manual") {
     await phase("Collecting company jobs");
     const urls = await companyUrls();
     let cursor = 0;
+    const companyBoards = new Map<string, Promise<CompanyJobs>>();
     const companyDeadline = Math.min(deadline, Date.now() + 5 * 60 * 1000);
     await Promise.all(
       Array.from({ length: 3 }, async () => {
@@ -264,12 +265,18 @@ export async function runWorkflow(trigger = "manual") {
         ) {
           const url = urls[cursor++];
           try {
-            for (const j of await withSourceBudget(
+            const collected = await withSourceBudget(
               () => collectCompany(url),
               Math.min(20000, companyDeadline - Date.now()),
               controller.signal,
-            ))
-              await accept(j);
+              companyBoards,
+            );
+            errors.push(
+              ...(collected.diagnostics || []).map(
+                (message) => `${url}: ${message}`,
+              ),
+            );
+            for (const j of collected) await accept(j);
           } catch (e) {
             errors.push(`${url}: ${String(e)}`);
           }

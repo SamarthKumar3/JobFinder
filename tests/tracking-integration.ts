@@ -65,6 +65,18 @@ try {
     ids[0],
   ]);
   assert.equal((await list("apply")).jobs[0].application_status, "applied");
+  // Applied overrides a rejection, a pending evaluation, or a filtered update.
+  await pool.query(
+    "UPDATE jobs SET state='evaluated',decision='rejected',application_status='applied' WHERE id=$1",
+    [ids[1]],
+  );
+  await pool.query(
+    "UPDATE jobs SET state='filtered',decision=NULL,application_status='applied' WHERE id=$1",
+    [ids[2]],
+  );
+  assert.equal((await list("apply")).total, 3);
+  assert.equal((await list("rejected")).total, 0);
+  assert.equal((await list("pending")).total, 0);
   console.log(
     "Tracking integration passed: evaluation-time ordering, unevaluated dates, rejection override, status persistence through re-ingestion, and changed-content timestamp invalidation.",
   );
